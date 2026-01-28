@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=CS_hist
+#SBATCH --job-name=CS_proj
 #SBATCH --partition=compute
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=128
@@ -19,23 +19,23 @@ echo "Processing years ${START_YEAR} to ${END_YEAR}"
 echo "Job started at $(date)"
 
 # Run the python script
-python download_to_zarr.py --stream clmn --year-range 1990 2014 --param 235165 --levtype sfc --activity projections --experiment "ssp3-7.0" --model ifs-fesom
-python download_to_zarr.py --stream clmn --year-range 1990 2014 --param 235165 --levtype sfc --activity projections --experiment "ssp3-7.0" --model icon
-python download_to_zarr.py --stream clmn --year-range 1990 2014 --param 235165 --levtype sfc --activity projections --experiment "ssp3-7.0" --model ifs-nemo
+python download_to_zarr.py --stream clmn --year-range 2015 2049 --param 235165 --levtype sfc --activity projections --experiment "ssp3-7.0" --model ifs-fesom
+python download_to_zarr.py --stream clmn --year-range 2015 2049 --param 235165 --levtype sfc --activity projections --experiment "ssp3-7.0" --model icon
+python download_to_zarr.py --stream clmn --year-range 2015 2049 --param 235165 --levtype sfc --activity projections --experiment "ssp3-7.0" --model ifs-nemo
 
 
-python download_to_zarr.py --stream clmn --year-range 1990 2014 --param 235166 --levtype sfc --activity projections --experiment "ssp3-7.0" --model ifs-fesom
-python download_to_zarr.py --stream clmn --year-range 1990 2014 --param 235166 --levtype sfc --activity projections --experiment "ssp3-7.0" --model icon
-python download_to_zarr.py --stream clmn --year-range 1990 2014 --param 235166 --levtype sfc --activity projections --experiment "ssp3-7.0" --model ifs-nemo
+python download_to_zarr.py --stream clmn --year-range 2015 2049 --param 235166 --levtype sfc --activity projections --experiment "ssp3-7.0" --model ifs-fesom
+python download_to_zarr.py --stream clmn --year-range 2015 2049 --param 235166 --levtype sfc --activity projections --experiment "ssp3-7.0" --model icon
+python download_to_zarr.py --stream clmn --year-range 2015 2049 --param 235166 --levtype sfc --activity projections --experiment "ssp3-7.0" --model ifs-nemo
 
 
-python download_to_zarr.py --stream clmn --year-range 1990 2014 --param 228004 --levtype sfc --activity projections --experiment "ssp3-7.0" --model ifs-fesom
-python download_to_zarr.py --stream clmn --year-range 1990 2014 --param 228004 --levtype sfc --activity projections --experiment "ssp3-7.0" --model icon
-python download_to_zarr.py --stream clmn --year-range 1990 2014 --param 228004 --levtype sfc --activity projections --experiment "ssp3-7.0" --model ifs-nemo
+python download_to_zarr.py --stream clmn --year-range 2015 2049 --param 228004 --levtype sfc --activity projections --experiment "ssp3-7.0" --model ifs-fesom
+python download_to_zarr.py --stream clmn --year-range 2015 2049 --param 228004 --levtype sfc --activity projections --experiment "ssp3-7.0" --model icon
+python download_to_zarr.py --stream clmn --year-range 2015 2049 --param 228004 --levtype sfc --activity projections --experiment "ssp3-7.0" --model ifs-nemo
 
 
-python download_to_zarr.py --stream clmn --year-range 1990 2014 --param 235055 --levtype sfc --activity projections --experiment "ssp3-7.0" --model ifs-fesom
-python download_to_zarr.py --stream clmn --year-range 1990 2014 --param 235055 --levtype sfc --activity projections --experiment "ssp3-7.0" --model icon
-python download_to_zarr.py --stream clmn --year-range 1990 2014 --param 235055 --levtype sfc --activity projections --experiment "ssp3-7.0" --model ifs-nemo
+python download_to_zarr.py --stream clmn --year-range 2015 2049 --param 235055 --levtype sfc --activity projections --experiment "ssp3-7.0" --model ifs-fesom
+python download_to_zarr.py --stream clmn --year-range 2015 2049 --param 235055 --levtype sfc --activity projections --experiment "ssp3-7.0" --model icon
+python download_to_zarr.py --stream clmn --year-range 2015 2049 --param 235055 --levtype sfc --activity projections --experiment "ssp3-7.0" --model ifs-nemo
  
 echo "Job finished at $(date)"
