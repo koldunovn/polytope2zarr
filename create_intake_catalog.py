@@ -31,7 +31,7 @@ DEFAULT_INPUT_DIR = Path("/work/ab0995/a270088/DestinE/PHASE2_zarr_joint/")
 
 # Resolution values based on values dimension (exact values)
 HIGH_RES_VALUES = 12582912  # High resolution grid points
-LOW_RES_VALUES = 196608     # Low resolution grid points
+STANDARD_RES_VALUES = 196608  # Standard resolution grid points
 
 
 def parse_args() -> argparse.Namespace:
@@ -122,7 +122,7 @@ def get_dataset_info(zarr_path: Path) -> dict | None:
                     time_freq = "6hourly"
                 elif median_hours <= 36:
                     time_freq = "daily"
-                elif median_hours <= 24 * 15:
+                elif median_hours <= 24 * 45:  # up to ~45 days covers monthly
                     time_freq = "monthly"
                 else:
                     time_freq = "yearly"
@@ -140,18 +140,20 @@ def get_dataset_info(zarr_path: Path) -> dict | None:
 def get_resolution_label(values_size: int) -> str:
     """Get resolution label based on values dimension size (exact match)."""
     if values_size == HIGH_RES_VALUES:
-        return "hires"
-    elif values_size == LOW_RES_VALUES:
-        return "lores"
+        return "high"
+    elif values_size == STANDARD_RES_VALUES:
+        return "standard"
     else:
         # Unknown resolution - include the actual value
         return f"res{values_size}"
 
 
-def generate_suffix(info: dict) -> str:
+def generate_suffix(info: dict | None) -> str:
     """Generate an informative suffix based on dataset characteristics."""
-    parts = []
+    if info is None:
+        return "_unknown"
 
+    parts = []
     dims = info.get("dims", {})
 
     # Add resolution indicator
@@ -166,7 +168,7 @@ def generate_suffix(info: dict) -> str:
 
     if parts:
         return "_" + "_".join(parts)
-    return ""
+    return "_unknown"
 
 
 def info_matches(info1: dict, info2: dict) -> bool:
@@ -236,13 +238,9 @@ def create_catalog(input_dir: Path) -> dict:
         info_groups = split_by_info(files)
 
         for info_group in info_groups:
-            # Create source name with informative suffix
-            if len(info_groups) == 1:
-                source_name = group_key
-            else:
-                # Generate suffix based on resolution and time frequency
-                suffix = generate_suffix(info_group[0]["info"])
-                source_name = f"{group_key}{suffix}"
+            # Always generate suffix based on resolution and time frequency
+            suffix = generate_suffix(info_group[0]["info"])
+            source_name = f"{group_key}{suffix}"
 
             # Log info
             info = info_group[0]["info"]
