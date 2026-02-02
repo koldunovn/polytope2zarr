@@ -4,6 +4,10 @@ Consolidate multiple time-step zarr files into single datasets.
 Scans a directory of zarr files created by download_to_zarr.py and combines
 all time steps for each variable into a single consolidated zarr store.
 
+By default, skips datasets that already exist in the output directory.
+If source data has changed (different years, resolution, or time steps),
+a warning is logged but the dataset is still skipped unless --force is used.
+
 Usage examples:
   # List available datasets
   python consolidate_zarr.py --list
@@ -16,6 +20,9 @@ Usage examples:
 
   # Consolidate all available datasets
   python consolidate_zarr.py --all
+
+  # Force reconsolidation even if output exists
+  python consolidate_zarr.py --datasets my_dataset --force
 """
 
 import argparse
@@ -80,6 +87,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target-chunk-mb", type=int, default=100,
         help="Target chunk size in MB for automatic level chunking (default: 100)",
+    )
+    parser.add_argument(
+        "--force", "-f", action="store_true",
+        help="Force reconsolidation even if output already exists",
     )
     return parser.parse_args()
 
@@ -234,6 +245,141 @@ def calculate_3d_chunks(
     return chunks
 
 
+def get_dataset_metadata(zarr_path: Path) -> dict | None:
+    """Extract metadata from an existing zarr dataset for comparison.
+
+    Returns dict with keys: n_years, n_time_steps, values_size, or None if cannot read.
+    """
+    try:
+        ds = xr.open_zarr(zarr_path, consolidated=True)
+    except Exception:
+        try:
+            ds = xr.open_zarr(zarr_path, consolidated=False)
+        except Exception:
+            return None
+
+    metadata = {
+        "n_time_steps": ds.sizes.get("time", 0),
+        "values_size": ds.sizes.get("values", 0),
+    }
+
+    # Extract years from time coordinate
+    if "time" in ds.coords:
+        try:
+            years = set(ds.time.dt.year.values)
+            metadata["n_years"] = len(years)
+            metadata["year_range"] = (min(years), max(years))
+        except Exception:
+            metadata["n_years"] = 0
+            metadata["year_range"] = (0, 0)
+    else:
+        metadata["n_years"] = 0
+        metadata["year_range"] = (0, 0)
+
+    ds.close()
+    return metadata
+
+
+def get_source_metadata(paths: list[Path]) -> dict:
+    """Extract expected metadata from source zarr files.
+
+    Returns dict with keys: n_years, n_time_steps, values_size.
+    """
+    total_time_steps = 0
+    values_size = 0
+    all_years = set()
+
+    for p in paths:
+        try:
+            ds = xr.open_zarr(p, consolidated=True)
+        except Exception:
+            try:
+                ds = xr.open_zarr(p, consolidated=False)
+            except Exception:
+                continue
+
+        total_time_steps += ds.sizes.get("time", 0)
+        if values_size == 0:
+            values_size = ds.sizes.get("values", 0)
+
+        if "time" in ds.coords:
+            try:
+                years = set(ds.time.dt.year.values)
+                all_years.update(years)
+            except Exception:
+                pass
+
+        ds.close()
+
+    return {
+        "n_time_steps": total_time_steps,
+        "values_size": values_size,
+        "n_years": len(all_years),
+        "year_range": (min(all_years), max(all_years)) if all_years else (0, 0),
+    }
+
+
+def check_existing_dataset(
+    base_name: str,
+    paths: list[Path],
+    output_dir: Path,
+) -> bool:
+    """Check if dataset already exists and compare metadata.
+
+    Returns True if dataset should be skipped, False if it should be processed.
+    """
+    output_path = output_dir / f"{base_name}.zarr"
+
+    if not output_path.exists():
+        return False
+
+    logger.info("Found existing dataset: %s", output_path)
+
+    existing_meta = get_dataset_metadata(output_path)
+    if existing_meta is None:
+        logger.warning("Cannot read existing dataset %s, will reconsolidate", output_path)
+        return False
+
+    source_meta = get_source_metadata(paths)
+
+    differences = []
+
+    # Check number of years
+    if existing_meta["n_years"] != source_meta["n_years"]:
+        differences.append(
+            f"Number of years changed: existing={existing_meta['n_years']} "
+            f"(range {existing_meta['year_range'][0]}-{existing_meta['year_range'][1]}), "
+            f"source={source_meta['n_years']} "
+            f"(range {source_meta['year_range'][0]}-{source_meta['year_range'][1]})"
+        )
+
+    # Check resolution (values dimension size - high resolution has more values)
+    if existing_meta["values_size"] != source_meta["values_size"]:
+        existing_res = "high" if existing_meta["values_size"] > 1_000_000 else "standard"
+        source_res = "high" if source_meta["values_size"] > 1_000_000 else "standard"
+        differences.append(
+            f"Resolution changed: existing={existing_res} ({existing_meta['values_size']} values), "
+            f"source={source_res} ({source_meta['values_size']} values)"
+        )
+
+    # Check number of time steps
+    if existing_meta["n_time_steps"] != source_meta["n_time_steps"]:
+        differences.append(
+            f"Number of time steps changed: existing={existing_meta['n_time_steps']}, "
+            f"source={source_meta['n_time_steps']}"
+        )
+
+    if differences:
+        logger.warning("Dataset %s exists but has changed:", base_name)
+        for diff in differences:
+            logger.warning("  - %s", diff)
+        logger.info("Skipping %s (use --force to reconsolidate)", base_name)
+        return True
+
+    logger.info("Dataset %s already exists and is up-to-date, skipping", base_name)
+    return True
+
+
 def consolidate_dataset(
     base_name: str,
     paths: list[Path],
@@ -242,8 +388,13 @@ def consolidate_dataset(
     values_chunk: int,
     level_chunk: int | None,
     target_chunk_mb: int,
+    force: bool = False,
 ) -> None:
     """Consolidate multiple zarr files into a single dataset."""
+    # Check if already exists (unless force is set)
+    if not force and check_existing_dataset(base_name, paths, output_dir):
+        return
+
     logger.info("Consolidating dataset: %s (%d files)", base_name, len(paths))
 
     # Open all datasets
@@ -356,6 +507,7 @@ def main():
             values_chunk=args.values_chunk,
             level_chunk=args.level_chunk,
             target_chunk_mb=args.target_chunk_mb,
+            force=args.force,
         )
 
     logger.info("Done!")

@@ -18,6 +18,6 @@ echo "Processing years ${START_YEAR} to ${END_YEAR}"
 echo "Job started at $(date)"
 
 # Run the python script
-python download_to_zarr.py --stream clte --year-range 1990 2014 --param 263124 --model ifs-fesom
+python download_to_zarr.py --stream clte --year-range 1990 2014 --param 263124 --model ifs-nemo
 
 echo "Job finished at $(date)"

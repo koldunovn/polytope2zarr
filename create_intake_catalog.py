@@ -255,15 +255,19 @@ def create_catalog(input_dir: Path) -> dict:
             # Build urlpath list
             urlpaths = [str(f["path"]) for f in sorted(info_group, key=lambda x: x["parsed"]["param"])]
 
+            # Build args - only include multi-file options when there are multiple files
+            args = {
+                "consolidated": True,
+                "urlpath": urlpaths if len(urlpaths) > 1 else urlpaths[0],
+            }
+            if len(urlpaths) > 1:
+                args["combine"] = "by_coords"
+                args["compat"] = "override"
+                args["parallel"] = True
+
             sources[source_name] = {
                 "driver": "zarr",
-                "args": {
-                    "consolidated": True,
-                    "urlpath": urlpaths,
-                    "combine": "by_coords",
-                    "compat": "override",
-                    "parallel": True,
-                },
+                "args": args,
             }
 
     catalog = {"sources": sources}
