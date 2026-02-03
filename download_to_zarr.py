@@ -5,26 +5,36 @@ Retrieves data via earthkit.data, converts per-record to xarray,
 concatenates along time, and writes to a chunked zarr store.
 
 Supports two stream modes:
-  - clmn (default): Monthly climatology data. Requested by year/month,
-    processed one year at a time.
-  - clte: Daily climate data. Requested by date range, processed one
-    month at a time (polytope cannot handle yearly requests for clte).
+  - clmn (default): Monthly climatology data. Requested by year/month.
+  - clte: Daily climate data. Requested by date range.
+
+Chunking strategy:
+  - Monthly surface data (clmn + sfc): 5-year chunks
+  - Daily surface data (clte, o2d): 6-month chunks
+  - Other combinations: 1-year chunks (configurable via --chunk-years/--chunk-months)
+
+Output naming convention:
+  {activity}_{experiment}_{generation}_{model}_{realization}_{expver}_{stream}_{resolution}_{levtype}_{param}_{start_date}_{end_date}.zarr
 
 Prerequisites:
   - Authentication token at ~/.polytopeapirc (run desp-authentication.py)
   - zarr installed: pip install zarr
 
 Usage examples:
-  # clmn stream — 2D surface data (o2d)
-  python download_to_zarr.py --year-range 2005 2010
-  python download_to_zarr.py --year-range 2006 2006 --model ifs-nemo --param 263001
-  python download_to_zarr.py --year-range 2005 2010 --activity projection --experiment ssp3-7.0
+  # clmn stream — monthly surface data (5-year chunks)
+  python download_to_zarr.py --year-range 2006 2010 --levtype sfc --param 235165
+  python download_to_zarr.py --year-range 2006 2015 --activity projections --experiment ssp3-7.0
 
-  # clmn stream — 3D ocean data (o3d)
-  python download_to_zarr.py --year-range 2006 2006 --levtype o3d --resolution standard --nlevels 70 --param 263501
+  # clmn stream — monthly ocean 2D data (1-year chunks by default)
+  python download_to_zarr.py --year-range 2006 2010 --levtype o2d --param 263101
 
-  # clte stream — daily data, processed month by month
-  python download_to_zarr.py --stream clte --year-range 1990 1990 --param 263124
+  # clmn stream — 3D ocean data (o3d) with sequential levels
+  python download_to_zarr.py --year-range 2006 2006 --levtype o3d --resolution standard --nlevels 69 --param 263501
+
+  # clmn stream — 3D pressure level data (pl) with custom levels
+  python download_to_zarr.py --year-range 2006 2006 --levtype pl --resolution standard --levelist "1/5/10/20/30/50/70/100/150/200/250/300/400/500/600/700/850/925/1000" --param 235130
+
+  # clte stream — daily data (6-month chunks)
   python download_to_zarr.py --stream clte --year-range 1990 1991 --param 263124 --time 0000
 """
 
@@ -50,6 +60,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
+DEFAULT_OUTPUT_DIR = Path("/work/ab0995/a270088/DestinE/GENERATION2/")
+
 SERVER_ADDRESSES = {
     "ifs-fesom": "polytope.lumi.apps.dte.destination-earth.eu",
     "icon":      "polytope.lumi.apps.dte.destination-earth.eu",
@@ -60,10 +72,15 @@ MONTHS = "1/2/3/4/5/6/7/8/9/10/11/12"
 MAX_RETRIES = 3
 RETRY_DELAY = 30  # seconds
 
+# Chunking defaults
+MONTHLY_SFC_CHUNK_YEARS = 5    # 5-year chunks for monthly surface data
+DAILY_CHUNK_MONTHS = 6         # 6-month chunks for daily data
+DEFAULT_CHUNK_YEARS = 1        # Default: 1-year chunks
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Download monthly climate data from DESP polytope API and save to zarr."
+        description="Download climate data from DESP polytope API and save to zarr."
     )
     parser.add_argument(
         "--year-range", nargs=2, type=int, required=True,
@@ -73,8 +90,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stream", default="clmn", choices=("clmn", "clte"),
         help="Data stream (default: clmn). "
-             "clmn = monthly climatology (year-by-year). "
-             "clte = daily climate data (month-by-month).",
+             "clmn = monthly climatology. "
+             "clte = daily climate data.",
     )
     parser.add_argument(
         "--time", default=None,
@@ -89,16 +106,28 @@ def parse_args() -> argparse.Namespace:
         help="Experiment (default: hist)",
     )
     parser.add_argument(
+        "--generation", default="2",
+        help="Generation (default: 2)",
+    )
+    parser.add_argument(
         "--model", default="ifs-fesom",
         help="Model (default: ifs-fesom)",
+    )
+    parser.add_argument(
+        "--realization", default="1",
+        help="Realization (default: 1)",
+    )
+    parser.add_argument(
+        "--expver", default="0001",
+        help="Experiment version (default: 0001)",
     )
     parser.add_argument(
         "--resolution", default="high",
         help="Resolution (default: high)",
     )
     parser.add_argument(
-        "--levtype", default="o2d",
-        help="Level type (default: o2d). Use o3d for 3D ocean data.",
+        "--levtype", default="sfc",
+        help="Level type (default: sfc). Use o2d for ocean 2D, o3d for 3D ocean data.",
     )
     parser.add_argument(
         "--param", default="263101",
@@ -110,10 +139,61 @@ def parse_args() -> argparse.Namespace:
              "Generates levelist 1..N and includes it in the request.",
     )
     parser.add_argument(
-        "--output-dir", type=Path, default=Path("/work/ab0995/a270088/DestinE/PHASE2_zarr/"),
-        help="Output directory (default: /work/ab0995/a270088/DestinE/PHASE2_zarr/)",
+        "--levelist", type=str, default=None,
+        help="Custom level list for 3D data, e.g. '1/5/10/20/30/50/70/100/150/200/250/300/400/500/600/700/850/925/1000'. "
+             "Takes precedence over --nlevels if both are specified.",
+    )
+    parser.add_argument(
+        "--chunk-years", type=int, default=None,
+        help="Override chunk size in years for clmn stream (default: auto-detected based on levtype)",
+    )
+    parser.add_argument(
+        "--chunk-months", type=int, default=None,
+        help="Override chunk size in months for clte stream (default: 6)",
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR,
+        help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})",
     )
     return parser.parse_args()
+
+
+def get_chunk_size(stream: str, levtype: str, chunk_years: int | None, chunk_months: int | None) -> tuple[int, int]:
+    """Determine chunk size based on stream and levtype.
+
+    Returns (chunk_years, chunk_months) where one will be 0.
+    For clmn stream: returns (years, 0)
+    For clte stream: returns (0, months)
+    """
+    if stream == "clte":
+        # Daily data: use 6-month chunks
+        months = chunk_months if chunk_months is not None else DAILY_CHUNK_MONTHS
+        return (0, months)
+
+    # clmn stream
+    if chunk_years is not None:
+        return (chunk_years, 0)
+
+    # Auto-detect based on levtype
+    if levtype == "sfc":
+        # Monthly surface data: 5-year chunks
+        return (MONTHLY_SFC_CHUNK_YEARS, 0)
+    else:
+        # Other monthly data (o2d, o3d): 1-year chunks
+        return (DEFAULT_CHUNK_YEARS, 0)
+
+
+def generate_zarr_filename(config: dict, start_date: str, end_date: str) -> str:
+    """Generate zarr filename following the new naming convention.
+
+    Format: {activity}_{experiment}_{generation}_{model}_{realization}_{expver}_{stream}_{resolution}_{levtype}_{param}_{start_date}_{end_date}.zarr
+    """
+    return (
+        f"{config['activity']}_{config['experiment']}_{config['generation']}_"
+        f"{config['model']}_{config['realization']}_{config['expver']}_"
+        f"{config['stream']}_{config['resolution']}_{config['levtype']}_"
+        f"{config['param']}_{start_date}_{end_date}.zarr"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +345,60 @@ def _process_chunk(request: dict, request_config: dict, label: str,
     print()
 
 
+def _generate_year_chunks(start_year: int, end_year: int, chunk_years: int) -> list[tuple[int, int]]:
+    """Generate list of (chunk_start_year, chunk_end_year) tuples."""
+    chunks = []
+    current = start_year
+    while current <= end_year:
+        chunk_end = min(current + chunk_years - 1, end_year)
+        chunks.append((current, chunk_end))
+        current = chunk_end + 1
+    return chunks
+
+
+def _generate_month_chunks(start_year: int, end_year: int, chunk_months: int) -> list[tuple[str, str]]:
+    """Generate list of (start_date, end_date) tuples for month-based chunks.
+
+    Returns dates in YYYY-MM-DD format.
+    """
+    chunks = []
+    current_year = start_year
+    current_month = 1
+
+    while current_year < end_year or (current_year == end_year and current_month <= 12):
+        # Start of chunk
+        start_date = f"{current_year}-{current_month:02d}-01"
+
+        # Calculate end of chunk
+        end_month = current_month + chunk_months - 1
+        end_year_chunk = current_year + (end_month - 1) // 12
+        end_month = ((end_month - 1) % 12) + 1
+
+        # Don't go past the requested end year
+        if end_year_chunk > end_year:
+            end_year_chunk = end_year
+            end_month = 12
+
+        last_day = calendar.monthrange(end_year_chunk, end_month)[1]
+        end_date = f"{end_year_chunk}-{end_month:02d}-{last_day:02d}"
+
+        chunks.append((start_date, end_date))
+
+        # Move to next chunk
+        current_month = end_month + 1
+        if current_month > 12:
+            current_month = 1
+            current_year = end_year_chunk + 1
+        else:
+            current_year = end_year_chunk
+
+        # Stop if we've passed the end year
+        if current_year > end_year:
+            break
+
+    return chunks
+
+
 def main():
     args = parse_args()
 
@@ -272,22 +406,31 @@ def main():
     if start_year > end_year:
         raise ValueError(f"Start year ({start_year}) must be <= end year ({end_year})")
 
-    has_levels = args.nlevels is not None
+    has_levels = args.nlevels is not None or args.levelist is not None
 
     server_address = SERVER_ADDRESSES.get(
         args.model, "polytope.lumi.apps.dte.destination-earth.eu"
     )
     logger.info("Using server: %s (model=%s)", server_address, args.model)
 
+    # Determine chunk size
+    chunk_years, chunk_months = get_chunk_size(
+        args.stream, args.levtype, args.chunk_years, args.chunk_months
+    )
+    if args.stream == "clte":
+        logger.info("Chunking: %d-month chunks (daily data)", chunk_months)
+    else:
+        logger.info("Chunking: %d-year chunks (monthly data, levtype=%s)", chunk_years, args.levtype)
+
     request_config = {
         "class": "d1",
         "dataset": "climate-dt",
         "activity": args.activity,
         "experiment": args.experiment,
-        "generation": "2",
+        "generation": args.generation,
         "model": args.model,
-        "realization": "1",
-        "expver": "0001",
+        "realization": args.realization,
+        "expver": args.expver,
         "stream": args.stream,
         "type": "fc",
         "resolution": args.resolution,
@@ -296,53 +439,56 @@ def main():
     }
 
     if has_levels:
-        request_config["levelist"] = [str(i) for i in range(1, args.nlevels + 1)]
+        if args.levelist is not None:
+            # Use custom level list (e.g., "1/5/10/20/30/50/70/100")
+            request_config["levelist"] = args.levelist
+        else:
+            # Generate sequential levels 1..N
+            request_config["levelist"] = "/".join(str(i) for i in range(1, args.nlevels + 1))
 
     if args.stream == "clte":
-        # clte: daily data — process month by month using date ranges
+        # clte: daily data — process in month-based chunks
         if args.time is None:
             logger.info("No --time specified for clte stream, defaulting to 0000")
         time_val = args.time or "0000"
         request_config["time"] = time_val
 
-        for year in range(start_year, end_year + 1):
-            for month in range(1, 13):
-                label = f"{year}-{month:02d}"
-                logger.info("===== Processing %s =====", label)
+        month_chunks = _generate_month_chunks(start_year, end_year, chunk_months)
+        logger.info("Will process %d chunk(s)", len(month_chunks))
 
-                first_day = f"{year}-{month:02d}-01"
-                last_day_num = calendar.monthrange(year, month)[1]
-                last_day = f"{year}-{month:02d}-{last_day_num:02d}"
-                date_range = f"{first_day}/to/{last_day}"
+        for start_date, end_date in month_chunks:
+            label = f"{start_date} to {end_date}"
+            logger.info("===== Processing %s =====", label)
 
-                request = {**request_config, "date": date_range}
+            date_range = f"{start_date}/to/{end_date}"
+            request = {**request_config, "date": date_range}
 
-                zarr_name = (
-                    f"{request_config['model']}_{request_config['activity']}"
-                    f"_{request_config['experiment']}_{request_config['levtype']}"
-                    f"_{request_config['param']}_y{year}m{month:02d}.zarr"
-                )
-                output_path = args.output_dir / zarr_name
-
-                _process_chunk(request, request_config, label,
-                               has_levels, output_path, server_address)
-
-    else:
-        # clmn: monthly climatology — process year by year
-        for year in range(start_year, end_year + 1):
-            year_str = str(year)
-            logger.info("===== Processing year %s =====", year_str)
-
-            request = {**request_config, "year": year_str, "month": MONTHS}
-
-            zarr_name = (
-                f"{request_config['model']}_{request_config['activity']}"
-                f"_{request_config['experiment']}_{request_config['levtype']}"
-                f"_{request_config['param']}_y{year_str}.zarr"
-            )
+            zarr_name = generate_zarr_filename(request_config, start_date, end_date)
             output_path = args.output_dir / zarr_name
 
-            _process_chunk(request, request_config, year_str,
+            _process_chunk(request, request_config, label,
+                           has_levels, output_path, server_address)
+
+    else:
+        # clmn: monthly climatology — process in year-based chunks
+        year_chunks = _generate_year_chunks(start_year, end_year, chunk_years)
+        logger.info("Will process %d chunk(s)", len(year_chunks))
+
+        for chunk_start, chunk_end in year_chunks:
+            label = f"{chunk_start}-{chunk_end}" if chunk_start != chunk_end else str(chunk_start)
+            logger.info("===== Processing years %s =====", label)
+
+            # Build year string for multi-year requests
+            years_list = "/".join(str(y) for y in range(chunk_start, chunk_end + 1))
+            request = {**request_config, "year": years_list, "month": MONTHS}
+
+            # Generate filename with date range
+            start_date = f"{chunk_start}-01-01"
+            end_date = f"{chunk_end}-12-31"
+            zarr_name = generate_zarr_filename(request_config, start_date, end_date)
+            output_path = args.output_dir / zarr_name
+
+            _process_chunk(request, request_config, label,
                            has_levels, output_path, server_address)
 
 

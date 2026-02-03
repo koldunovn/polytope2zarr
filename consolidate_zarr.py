@@ -1,11 +1,17 @@
 """
-Consolidate multiple time-step zarr files into single datasets.
+Consolidate multiple time-chunk zarr files into single datasets.
 
 Scans a directory of zarr files created by download_to_zarr.py and combines
-all time steps for each variable into a single consolidated zarr store.
+all time chunks for each variable into a single consolidated zarr store.
+
+Expected input naming convention:
+  {activity}_{experiment}_{generation}_{model}_{realization}_{expver}_{stream}_{resolution}_{levtype}_{param}_{start_date}_{end_date}.zarr
+
+Output naming convention (consolidated):
+  {activity}_{experiment}_{generation}_{model}_{realization}_{expver}_{stream}_{resolution}_{levtype}_{param}.zarr
 
 By default, skips datasets that already exist in the output directory.
-If source data has changed (different years, resolution, or time steps),
+If source data has changed (different time range or time steps),
 a warning is logged but the dataset is still skipped unless --force is used.
 
 Usage examples:
@@ -13,10 +19,7 @@ Usage examples:
   python consolidate_zarr.py --list
 
   # Consolidate a specific dataset
-  python consolidate_zarr.py --datasets ifs-fesom_projections_ssp3-7.0_sfc_235165
-
-  # Consolidate multiple datasets
-  python consolidate_zarr.py --datasets ifs-fesom_baseline_hist_o2d_263101 ifs-fesom_baseline_hist_o3d_263501
+  python consolidate_zarr.py --datasets baseline_hist_2_ifs-fesom_1_0001_clmn_high_sfc_235165
 
   # Consolidate all available datasets
   python consolidate_zarr.py --all
@@ -40,8 +43,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DEFAULT_INPUT_DIR = Path("/work/ab0995/a270088/DestinE/PHASE2_zarr/")
-DEFAULT_OUTPUT_DIR = Path("/work/ab0995/a270088/DestinE/PHASE2_zarr_joint/")
+DEFAULT_INPUT_DIR = Path("/work/ab0995/a270088/DestinE/GENERATION2/")
+DEFAULT_OUTPUT_DIR = Path("/work/ab0995/a270088/DestinE/GENERATION2_joint/")
 
 # Target chunk size in bytes (~100 MB)
 TARGET_CHUNK_BYTES = 100 * 1024 * 1024
@@ -96,34 +99,39 @@ def parse_args() -> argparse.Namespace:
 
 
 def extract_base_name_and_period(zarr_path: Path) -> tuple[str, str]:
-    """Extract the base name (without year/month suffix) and period from a zarr path.
+    """Extract the base name (without date suffix) and period from a zarr path.
 
-    Supports two naming patterns:
-      - clmn: {base}_y{year}.zarr -> ("base", "y2015")
-      - clte: {base}_y{year}m{month}.zarr -> ("base", "y2015m01")
+    Expected format:
+      {activity}_{experiment}_{generation}_{model}_{realization}_{expver}_{stream}_{resolution}_{levtype}_{param}_{start_date}_{end_date}.zarr
+
+    Returns:
+      (base_name, period) where period is "YYYY-MM-DD_YYYY-MM-DD"
     """
     name = zarr_path.name.replace(".zarr", "")
 
-    # Try clte pattern first (year + month)
-    match = re.match(r"(.+)_(y\d{4}m\d{2})$", name)
+    # Match: base_YYYY-MM-DD_YYYY-MM-DD
+    match = re.match(r"(.+)_(\d{4}-\d{2}-\d{2}_\d{4}-\d{2}-\d{2})$", name)
     if match:
         return match.group(1), match.group(2)
 
-    # Try clmn pattern (year only)
-    match = re.match(r"(.+)_(y\d{4})$", name)
-    if match:
-        return match.group(1), match.group(2)
-
-    # Fallback: return as-is
+    # No match - return as-is (will be logged as warning)
     return name, ""
 
 
-def extract_year_from_period(period: str) -> int:
-    """Extract year from period string like 'y2015' or 'y2015m01'."""
-    match = re.match(r"y(\d{4})", period)
-    if match:
-        return int(match.group(1))
-    return 0
+def extract_dates_from_period(period: str) -> tuple[str, str]:
+    """Extract start and end dates from period string.
+
+    Args:
+        period: String in format "YYYY-MM-DD_YYYY-MM-DD"
+
+    Returns:
+        (start_date, end_date) tuple
+    """
+    if "_" in period:
+        parts = period.split("_")
+        if len(parts) == 2:
+            return parts[0], parts[1]
+    return "", ""
 
 
 def scan_datasets(input_dir: Path) -> dict[str, list[Path]]:
@@ -146,7 +154,7 @@ def scan_datasets(input_dir: Path) -> dict[str, list[Path]]:
 
 
 def list_datasets(input_dir: Path) -> None:
-    """List all available datasets with their year ranges."""
+    """List all available datasets with their date ranges."""
     datasets = scan_datasets(input_dir)
 
     if not datasets:
@@ -154,23 +162,31 @@ def list_datasets(input_dir: Path) -> None:
         return
 
     print(f"\nAvailable datasets in {input_dir}:\n")
-    print("-" * 80)
+    print("-" * 100)
 
     for base_name in sorted(datasets.keys()):
         paths = datasets[base_name]
         periods = [extract_base_name_and_period(p)[1] for p in paths]
-        years = [extract_year_from_period(p) for p in periods]
-        years = [y for y in years if y > 0]
 
-        if years:
-            start_year = min(years)
-            end_year = max(years)
-            n_files = len(paths)
-            print(f"{base_name} | start year: {start_year} | end year: {end_year} | files: {n_files}")
+        # Extract all start and end dates
+        all_starts = []
+        all_ends = []
+        for period in periods:
+            start, end = extract_dates_from_period(period)
+            if start:
+                all_starts.append(start)
+            if end:
+                all_ends.append(end)
+
+        n_files = len(paths)
+        if all_starts and all_ends:
+            first_date = min(all_starts)
+            last_date = max(all_ends)
+            print(f"{base_name} | {first_date} to {last_date} | files: {n_files}")
         else:
-            print(f"{base_name} | (no year info) | files: {len(paths)}")
+            print(f"{base_name} | (no date info) | files: {n_files}")
 
-    print("-" * 80)
+    print("-" * 100)
     print(f"\nTotal: {len(datasets)} dataset(s)")
 
 
@@ -248,7 +264,7 @@ def calculate_3d_chunks(
 def get_dataset_metadata(zarr_path: Path) -> dict | None:
     """Extract metadata from an existing zarr dataset for comparison.
 
-    Returns dict with keys: n_years, n_time_steps, values_size, or None if cannot read.
+    Returns dict with keys: n_time_steps, values_size, time_range, or None if cannot read.
     """
     try:
         ds = xr.open_zarr(zarr_path, consolidated=True)
@@ -263,18 +279,15 @@ def get_dataset_metadata(zarr_path: Path) -> dict | None:
         "values_size": ds.sizes.get("values", 0),
     }
 
-    # Extract years from time coordinate
-    if "time" in ds.coords:
+    # Extract time range from time coordinate
+    if "time" in ds.coords and ds.sizes.get("time", 0) > 0:
         try:
-            years = set(ds.time.dt.year.values)
-            metadata["n_years"] = len(years)
-            metadata["year_range"] = (min(years), max(years))
+            time_vals = ds.time.values
+            metadata["time_range"] = (str(time_vals.min())[:10], str(time_vals.max())[:10])
         except Exception:
-            metadata["n_years"] = 0
-            metadata["year_range"] = (0, 0)
+            metadata["time_range"] = ("", "")
     else:
-        metadata["n_years"] = 0
-        metadata["year_range"] = (0, 0)
+        metadata["time_range"] = ("", "")
 
     ds.close()
     return metadata
@@ -283,11 +296,11 @@ def get_dataset_metadata(zarr_path: Path) -> dict | None:
 def get_source_metadata(paths: list[Path]) -> dict:
     """Extract expected metadata from source zarr files.
 
-    Returns dict with keys: n_years, n_time_steps, values_size.
+    Returns dict with keys: n_time_steps, values_size, time_range.
     """
     total_time_steps = 0
     values_size = 0
-    all_years = set()
+    all_times = []
 
     for p in paths:
         try:
@@ -302,20 +315,23 @@ def get_source_metadata(paths: list[Path]) -> dict:
         if values_size == 0:
             values_size = ds.sizes.get("values", 0)
 
-        if "time" in ds.coords:
+        if "time" in ds.coords and ds.sizes.get("time", 0) > 0:
             try:
-                years = set(ds.time.dt.year.values)
-                all_years.update(years)
+                time_vals = ds.time.values
+                all_times.extend([time_vals.min(), time_vals.max()])
             except Exception:
                 pass
 
         ds.close()
 
+    time_range = ("", "")
+    if all_times:
+        time_range = (str(min(all_times))[:10], str(max(all_times))[:10])
+
     return {
         "n_time_steps": total_time_steps,
         "values_size": values_size,
-        "n_years": len(all_years),
-        "year_range": (min(all_years), max(all_years)) if all_years else (0, 0),
+        "time_range": time_range,
     }
 
 
@@ -344,22 +360,18 @@ def check_existing_dataset(
 
     differences = []
 
-    # Check number of years
-    if existing_meta["n_years"] != source_meta["n_years"]:
+    # Check time range
+    if existing_meta["time_range"] != source_meta["time_range"]:
         differences.append(
-            f"Number of years changed: existing={existing_meta['n_years']} "
-            f"(range {existing_meta['year_range'][0]}-{existing_meta['year_range'][1]}), "
-            f"source={source_meta['n_years']} "
-            f"(range {source_meta['year_range'][0]}-{source_meta['year_range'][1]})"
+            f"Time range changed: existing={existing_meta['time_range'][0]} to {existing_meta['time_range'][1]}, "
+            f"source={source_meta['time_range'][0]} to {source_meta['time_range'][1]}"
         )
 
-    # Check resolution (values dimension size - high resolution has more values)
+    # Check values dimension size
     if existing_meta["values_size"] != source_meta["values_size"]:
-        existing_res = "high" if existing_meta["values_size"] > 1_000_000 else "standard"
-        source_res = "high" if source_meta["values_size"] > 1_000_000 else "standard"
         differences.append(
-            f"Resolution changed: existing={existing_res} ({existing_meta['values_size']} values), "
-            f"source={source_res} ({source_meta['values_size']} values)"
+            f"Values size changed: existing={existing_meta['values_size']}, "
+            f"source={source_meta['values_size']}"
         )
 
     # Check number of time steps
