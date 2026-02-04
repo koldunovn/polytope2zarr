@@ -84,7 +84,7 @@ def parse_zarr_filename(filename: str) -> dict | None:
         r"(\d+)_"                     # expver
         r"(clmn|clte)_"              # stream
         r"(high|standard)_"          # resolution
-        r"(sfc|o2d|o3d)_"            # levtype
+        r"(sfc|pl|o2d|o3d)_"         # levtype
         r"(\d+)$"                     # param
     )
     match = re.match(pattern, name)
