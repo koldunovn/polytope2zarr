@@ -43,8 +43,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DEFAULT_INPUT_DIR = Path("/work/ab0995/a270088/DestinE/GENERATION2/")
-DEFAULT_OUTPUT_DIR = Path("/work/ab0995/a270088/DestinE/GENERATION2_joint/")
+DEFAULT_INPUT_DIR = Path("/work/ab0995/a270088/DestinE/GENERATION2/3D/")
+DEFAULT_OUTPUT_DIR = Path("/work/ab0995/a270088/DestinE/GENERATION2_joint/3D/")
 
 # Target chunk size in bytes (~100 MB)
 TARGET_CHUNK_BYTES = 100 * 1024 * 1024

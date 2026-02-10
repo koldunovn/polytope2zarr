@@ -65,8 +65,8 @@ def parse_zarr_filename(filename: str) -> dict | None:
     name = filename.replace(".zarr", "")
 
     # Pattern breakdown:
-    # activity: baseline, projections
-    # experiment: hist, ssp3-7.0, etc.
+    # activity: baseline, projections, story-nudging
+    # experiment: hist, ssp3-7.0, cont, tplus2k, etc.
     # generation: numeric
     # model: can contain hyphens (ifs-fesom, ifs-nemo, icon)
     # realization: numeric
@@ -76,7 +76,7 @@ def parse_zarr_filename(filename: str) -> dict | None:
     # levtype: sfc, o2d, o3d
     # param: numeric code
     pattern = (
-        r"^(baseline|projections)_"  # activity
+        r"^(baseline|projections|story-nudging)_"  # activity
         r"([^_]+)_"                   # experiment
         r"(\d+)_"                     # generation
         r"([^_]+(?:-[^_]+)?)_"        # model (may contain hyphen)

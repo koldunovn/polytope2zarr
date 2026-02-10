@@ -88,6 +88,14 @@ def parse_args() -> argparse.Namespace:
         help="Start and end year (inclusive), e.g. --year-range 2005 2010",
     )
     parser.add_argument(
+        "--force", "-f", action="store_true",
+        help="Force re-download even if zarr file already exists",
+    )
+    parser.add_argument(
+        "--skip-existing", action="store_true", default=True,
+        help="Skip download if valid zarr file already exists (default: True)",
+    )
+    parser.add_argument(
         "--stream", default="clmn", choices=("clmn", "clte"),
         help="Data stream (default: clmn). "
              "clmn = monthly climatology. "
@@ -155,6 +163,10 @@ def parse_args() -> argparse.Namespace:
         "--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR,
         help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})",
     )
+    parser.add_argument(
+        "--address", type=str, default=None,
+        help="Override server address (default: auto-detected based on model)",
+    )
     return parser.parse_args()
 
 
@@ -194,6 +206,105 @@ def generate_zarr_filename(config: dict, start_date: str, end_date: str) -> str:
         f"{config['stream']}_{config['resolution']}_{config['levtype']}_"
         f"{config['param']}_{start_date}_{end_date}.zarr"
     )
+
+
+# ---------------------------------------------------------------------------
+# Validation functions
+# ---------------------------------------------------------------------------
+
+def verify_zarr_store(
+    zarr_path: Path,
+    expected_time_steps: int | None = None,
+    expected_levels: int | None = None,
+) -> tuple[bool, str]:
+    """Verify that a zarr store exists and is valid.
+
+    Args:
+        zarr_path: Path to the zarr store
+        expected_time_steps: Expected number of time steps (if known)
+        expected_levels: Expected number of levels for 3D data (if known)
+
+    Returns:
+        (is_valid, message) tuple
+    """
+    if not zarr_path.exists():
+        return False, "does not exist"
+
+    if not zarr_path.is_dir():
+        return False, "not a directory"
+
+    # Check for essential zarr metadata files
+    zmetadata = zarr_path / ".zmetadata"
+    zattrs = zarr_path / ".zattrs"
+    if not zmetadata.exists() and not zattrs.exists():
+        return False, "missing zarr metadata files"
+
+    # Try to open with xarray
+    try:
+        ds = xr.open_zarr(str(zarr_path))
+    except Exception as e:
+        return False, f"cannot open with xarray: {e}"
+
+    # Check that we have at least one data variable
+    if len(ds.data_vars) == 0:
+        ds.close()
+        return False, "no data variables found"
+
+    # Check time dimension exists and has data
+    if "time" not in ds.dims:
+        ds.close()
+        return False, "no time dimension"
+
+    n_time = ds.sizes["time"]
+    if n_time == 0:
+        ds.close()
+        return False, "time dimension is empty"
+
+    # Validate expected time steps if provided
+    if expected_time_steps is not None and n_time != expected_time_steps:
+        ds.close()
+        return False, f"expected {expected_time_steps} time steps, found {n_time}"
+
+    # For 3D data, check level dimension
+    if expected_levels is not None:
+        if "level" not in ds.dims:
+            ds.close()
+            return False, "expected level dimension but not found"
+        n_levels = ds.sizes["level"]
+        if n_levels != expected_levels:
+            ds.close()
+            return False, f"expected {expected_levels} levels, found {n_levels}"
+
+    # Try to access actual data (checks for corruption)
+    try:
+        var_name = list(ds.data_vars)[0]
+        # Just check the shape is accessible
+        _ = ds[var_name].shape
+    except Exception as e:
+        ds.close()
+        return False, f"cannot access data: {e}"
+
+    ds.close()
+    return True, f"valid ({n_time} time steps)"
+
+
+def calculate_expected_time_steps(
+    stream: str,
+    start_year: int,
+    end_year: int,
+    start_month: int = 1,
+    end_month: int = 12,
+) -> int:
+    """Calculate expected number of time steps for a request."""
+    if stream == "clmn":
+        # Monthly data: 12 months per year
+        n_years = end_year - start_year + 1
+        if start_year == end_year:
+            return end_month - start_month + 1
+        return n_years * 12
+    else:
+        # Daily data (clte) - more complex, skip for now
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -319,10 +430,38 @@ def save_to_zarr(ds: xr.Dataset, output_path: Path) -> None:
     logger.info("Saved zarr store to %s", output_path)
 
 
-def _process_chunk(request: dict, request_config: dict, label: str,
-                    has_levels: bool, output_path: Path,
-                    server_address: str) -> None:
-    """Download one chunk (a year or a month), convert, and save to zarr."""
+def _process_chunk(
+    request: dict,
+    request_config: dict,
+    label: str,
+    has_levels: bool,
+    output_path: Path,
+    server_address: str,
+    skip_existing: bool = True,
+    expected_time_steps: int | None = None,
+    expected_levels: int | None = None,
+) -> bool:
+    """Download one chunk (a year or a month), convert, and save to zarr.
+
+    Returns:
+        True if data was downloaded, False if skipped (already exists).
+    """
+    # Check if output already exists and is valid
+    if skip_existing and output_path.exists():
+        is_valid, msg = verify_zarr_store(
+            output_path,
+            expected_time_steps=expected_time_steps,
+            expected_levels=expected_levels,
+        )
+        if is_valid:
+            logger.info("SKIP: %s already exists and is %s", output_path.name, msg)
+            return False
+        else:
+            logger.warning("Existing %s is invalid (%s), will re-download", output_path.name, msg)
+            # Remove invalid zarr store
+            import shutil
+            shutil.rmtree(output_path)
+
     logger.info("Request: %s", request)
 
     data = download_data(request, server_address)
@@ -343,6 +482,7 @@ def _process_chunk(request: dict, request_config: dict, label: str,
     reopened = xr.open_zarr(str(output_path))
     print(reopened)
     print()
+    return True
 
 
 def _generate_year_chunks(start_year: int, end_year: int, chunk_years: int) -> list[tuple[int, int]]:
@@ -408,9 +548,26 @@ def main():
 
     has_levels = args.nlevels is not None or args.levelist is not None
 
-    server_address = SERVER_ADDRESSES.get(
-        args.model, "polytope.lumi.apps.dte.destination-earth.eu"
-    )
+    # Determine skip behavior
+    skip_existing = args.skip_existing and not args.force
+    if args.force:
+        logger.info("Force mode: will re-download even if files exist")
+    elif skip_existing:
+        logger.info("Skip mode: will skip existing valid zarr files")
+
+    # Determine expected number of levels for 3D data
+    expected_levels = None
+    if args.nlevels is not None:
+        expected_levels = args.nlevels
+    elif args.levelist is not None:
+        expected_levels = len(args.levelist.split("/"))
+
+    if args.address:
+        server_address = args.address
+    else:
+        server_address = SERVER_ADDRESSES.get(
+            args.model, "polytope.lumi.apps.dte.destination-earth.eu"
+        )
     logger.info("Using server: %s (model=%s)", server_address, args.model)
 
     # Determine chunk size
@@ -456,6 +613,8 @@ def main():
         month_chunks = _generate_month_chunks(start_year, end_year, chunk_months)
         logger.info("Will process %d chunk(s)", len(month_chunks))
 
+        downloaded = 0
+        skipped = 0
         for start_date, end_date in month_chunks:
             label = f"{start_date} to {end_date}"
             logger.info("===== Processing %s =====", label)
@@ -466,14 +625,27 @@ def main():
             zarr_name = generate_zarr_filename(request_config, start_date, end_date)
             output_path = args.output_dir / zarr_name
 
-            _process_chunk(request, request_config, label,
-                           has_levels, output_path, server_address)
+            was_downloaded = _process_chunk(
+                request, request_config, label,
+                has_levels, output_path, server_address,
+                skip_existing=skip_existing,
+                expected_time_steps=None,  # Daily data - don't validate time steps
+                expected_levels=expected_levels,
+            )
+            if was_downloaded:
+                downloaded += 1
+            else:
+                skipped += 1
+
+        logger.info("Summary: %d downloaded, %d skipped", downloaded, skipped)
 
     else:
         # clmn: monthly climatology — process in year-based chunks
         year_chunks = _generate_year_chunks(start_year, end_year, chunk_years)
         logger.info("Will process %d chunk(s)", len(year_chunks))
 
+        downloaded = 0
+        skipped = 0
         for chunk_start, chunk_end in year_chunks:
             label = f"{chunk_start}-{chunk_end}" if chunk_start != chunk_end else str(chunk_start)
             logger.info("===== Processing years %s =====", label)
@@ -488,8 +660,22 @@ def main():
             zarr_name = generate_zarr_filename(request_config, start_date, end_date)
             output_path = args.output_dir / zarr_name
 
-            _process_chunk(request, request_config, label,
-                           has_levels, output_path, server_address)
+            # Calculate expected time steps (12 months per year for clmn)
+            expected_time_steps = (chunk_end - chunk_start + 1) * 12
+
+            was_downloaded = _process_chunk(
+                request, request_config, label,
+                has_levels, output_path, server_address,
+                skip_existing=skip_existing,
+                expected_time_steps=expected_time_steps,
+                expected_levels=expected_levels,
+            )
+            if was_downloaded:
+                downloaded += 1
+            else:
+                skipped += 1
+
+        logger.info("Summary: %d downloaded, %d skipped", downloaded, skipped)
 
 
 if __name__ == "__main__":
